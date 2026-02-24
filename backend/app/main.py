@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import (
+    Boolean,
     Column,
     Date,
     DateTime,
@@ -18,6 +19,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     func,
+    text,
 )
 from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 
@@ -56,6 +58,7 @@ class Employee(Base):
     full_name = Column(String(255), nullable=False)
     email = Column(String(255), unique=True, nullable=False, index=True)
     department = Column(String(100), nullable=True)
+    is_active = Column(Boolean, nullable=False, server_default=text("true"))
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -107,6 +110,7 @@ class EmployeeCreate(EmployeeBase):
 
 class EmployeeRead(EmployeeBase):
     id: int
+    is_active: bool
     created_at: datetime
 
     class Config:
@@ -159,6 +163,14 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
+    # Minimal migration for existing DBs: ensure soft-delete column exists.
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE employees "
+                "ADD COLUMN IF NOT EXISTS is_active boolean NOT NULL DEFAULT true"
+            )
+        )
 
 
 @app.get("/health", tags=["health"])
@@ -252,9 +264,13 @@ def list_employees(
     full_name: Optional[str] = None,
     email: Optional[str] = None,
     department: Optional[str] = None,
+    include_inactive: bool = False,
     db: Session = Depends(get_db),
 ):
     query = db.query(Employee)
+
+    if not include_inactive:
+        query = query.filter(Employee.is_active.is_(True))
 
     if id is not None:
         query = query.filter(Employee.id == id)
@@ -286,7 +302,7 @@ def delete_employee(employee_id: int, db: Session = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Employee not found",
         )
-    db.delete(employee)
+    employee.is_active = False
     db.commit()
 
 
@@ -303,7 +319,7 @@ def create_attendance(
     db: Session = Depends(get_db),
 ):
     employee = db.query(Employee).filter(Employee.id == attendance_in.employee_id).first()
-    if not employee:
+    if not employee or not employee.is_active:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Employee not found",
