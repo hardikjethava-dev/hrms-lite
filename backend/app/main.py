@@ -178,6 +178,11 @@ def health_check():
     return {"status": "ok"}
 
 
+@app.get("/")
+def root():
+    return {"status": "running"}
+
+
 # Employee CRUD
 
 
